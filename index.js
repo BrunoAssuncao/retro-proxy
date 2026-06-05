@@ -1,226 +1,381 @@
-require("dotenv").config();
 const fs = require("fs");
-const fetch = require("node-fetch");
-const express = require("express");
-const cheerio = require("cheerio");
-const minify = require("html-minifier").minify;
-const CleanCSS = require("clean-css");
-const Jimp = require("jimp");
+const http = require("http");
+const https = require("https");
 const { URL } = require("url");
 
-const app = express();
-
-const ip = process.env.IP;
-const port = process.env.PORT || 3000;
-const stripCSS = process.env.NO_CSS;
-const stripJs = process.env.NO_JS;
-const minifyImages = Boolean(process.env.RESIZE_TO);
-let friendlies = [];
-try {
-  const input = fs.readFileSync(process.env.ALLOWLIST, { encoding: "utf-8" });
-  friendlies = input.trim().split("\n");
-  console.log("allow-list", friendlies);
-} catch (error) {
-  console.error('Failed to open "allowed.txt"! See allowed.txt.example for a starting point.');
-  friendlies = [];
-}
-const maxSrcWidth = process.env.RESIZE_TO;
-const maxInlineWidth = process.env.SCALE_TO;
-
-const cssMinifyOptions = {
-  compatibility: {
-    colors: {
-      opacity: false, // controls `rgba()` / `hsla()` color support
-    },
-    properties: {
-      backgroundClipMerging: false, // controls background-clip merging into shorthand
-      backgroundOriginMerging: false, // controls background-origin merging into shorthand
-      backgroundSizeMerging: false, // controls background-size merging into shorthand
-      colors: true, // controls color optimizations
-      ieBangHack: true, // controls keeping IE bang hack
-      ieFilters: true, // controls keeping IE `filter` / `-ms-filter`
-      iePrefixHack: true, // controls keeping IE prefix hack
-      ieSuffixHack: true, // controls keeping IE suffix hack
-      merging: false, // controls property merging based on understandability
-      shorterLengthUnits: false, // controls shortening pixel units into `pc`, `pt`, or `in` units
-      spaceAfterClosingBrace: true, // controls keeping space after closing brace - `url() no-repeat` into `url()no-repeat`
-      urlQuotes: true, // controls keeping quoting inside `url()`
-      zeroUnits: true, // controls removal of units `0` value
-    },
-    selectors: {
-      adjacentSpace: false, // controls extra space before `nav` element
-      ie7Hack: false, // controls removal of IE7 selector hacks, e.g. `*+html...`
-      mergeLimit: 8191, // controls maximum number of selectors in a single rule (since 4.1.0)
-      multiplePseudoMerging: true, // controls merging of rules with multiple pseudo classes / elements (since 4.1.0)
-    },
-    units: {
-      ch: false, // controls treating `ch` as a supported unit
-      in: false, // controls treating `in` as a supported unit
-      pc: false, // controls treating `pc` as a supported unit
-      pt: false, // controls treating `pt` as a supported unit
-      rem: false, // controls treating `rem` as a supported unit
-      vh: false, // controls treating `vh` as a supported unit
-      vm: false, // controls treating `vm` as a supported unit
-      vmax: false, // controls treating `vmax` as a supported unit
-      vmin: false, // controls treating `vmin` as a supported unit
-    },
-  },
-};
-
-const minifyOptions = {
-  collapseBooleanAttributes: true,
-  collapseWhitespace: true,
-  processConditionalComments: true,
-  removeComments: true,
-  minifyCSS: stripCSS ? false : cssMinifyOptions,
-  continueOnParseError: true
-};
-
-app.get("*", async (req, res, next) => {
-  const friendly = friendlies.some((f) => req.hostname.endsWith(f));
-  const url = req.originalUrl;
-  if (friendly) {
-    console.log("friendly site:", url);
-  }
+function loadDotEnv(filePath = ".env") {
   try {
-    const upstream = await fetch(url);
-    const contentType = upstream.headers.get("content-type");
-    //console.log(contentType);
-    if (contentType.startsWith("text/html")) {
-      const imageSizes = {};
-      const text = (await upstream.text()).replace(/https:\/\//g, "http://");
-      const $ = cheerio.load(text);
-      if (!friendly && stripJs) {
-        $("script").remove();
-        $("noscript").after(function (index) {
-          $(this).contents();
-        });
-        $("noscript").remove();
-      }
-      if (!friendly && stripCSS) {
-        $("style").remove();
-        $("link").remove();
-        $("*").removeAttr("class");
-        $("*").removeAttr("style");
-      }
-      if (!friendly) {
-        const imgs = [];
-        $("img").each(function () {
-          const src = new URL($(this).attr("src"), url).href;
-          //remove SVGs for now
-          if (src.toLowerCase().endsWith(".svg")) {
-            $(this).remove();
-          } else {
-            imgs.push(this);
-          }
-        });
+    const content = fs.readFileSync(filePath, "utf-8");
+    const lines = content.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIndex = trimmed.indexOf("=");
+      if (eqIndex === -1) continue;
 
-        if (maxInlineWidth) {
-          //set image tag sizes
-          for (let img of imgs) {
-            const src = new URL($(img).attr("src"), url).href;
-            const attrWidth = $(img).attr("width");
-            const attrHeight = $(img).attr("height");
-            if (!attrWidth) {
-              try {
-                if (!imageSizes[src]) {
-                  const image = await Jimp.read(src);
-                  imageSizes[src] = {
-                    width: image.bitmap.width,
-                    height: image.bitmap.height,
-                  };
-                }
-                const width = Math.min(maxInlineWidth, imageSizes[src].width);
-                const height =
-                  (imageSizes[src].height * width) / imageSizes[src].width;
-                $(this).attr("width", width);
-                $(this).attr("height", height);
-              } catch (error) {
-                console.error("Unable to resize image: "+error);
-              }
-            } else {
-              const width = Math.min(maxInlineWidth, attrWidth);
-              const height = (attrHeight * width) / attrWidth;
-              $(this).attr("width", width);
-              $(this).attr("height", height);
-            }
-          }
-        }
+      const key = trimmed.slice(0, eqIndex).trim();
+      let value = trimmed.slice(eqIndex + 1).trim();
+
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
       }
-      //fix root-relative URLs for Netscape
-      $("[href^='/']").each(function(index,element) {
-      const href = $(element).attr('href');
-      $(this).attr('href',new URL(url).origin+href);
-    });
-      res.set("Content-Type", "text/html");
-      res.status(upstream.status);
-      if (!friendly) {
-        const minified = minify(
-          $.root()
-            .html()
-            .replace(/&apos;/g, "'"),
-          minifyOptions
-        );
-        console.log("html minified", contentType, url);
-        res.send(minified);
-      } else {
-        res.send(
-          $.root()
-            .html()
-            .replace(/&apos;/g, "'")
-        );
+
+      if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
+        process.env[key] = value;
       }
-    } else if (contentType.startsWith("text/css")) {
-      const text = await upstream.text();
-      res.set("Content-Type", "text/css");
-      res.status(upstream.status);
-      res.send(new CleanCSS(cssMinifyOptions).minify(text).styles);
-      console.log("css minified", contentType, url);
-    } else if (
-      !friendly &&
-      minifyImages &&
-      contentType.startsWith("image/") &&
-      !contentType.includes("xml")
-    ) {
-      const buffer = await upstream.buffer();
-      const image = await Jimp.read(buffer);
-      image.resize(Math.min(maxSrcWidth, image.bitmap.width), Jimp.AUTO);
-      image.quality(50);
-      const output = await image.getBufferAsync("image/jpeg");
-      res.set("Content-Type", "image/jpeg");
-      res.status(upstream.status);
-      res.send(output);
-      console.log("image minified", contentType, url);
-    } else {
-      res.set("Content-Type", contentType);
-      res.status(upstream.status);
-      res.send(await upstream.buffer());
     }
+  } catch (_error) {
+    // .env file is optional
+  }
+}
+
+function parseBoolean(value) {
+  if (value == null) return false;
+  const normalized = String(value).trim().toLowerCase();
+  return (
+    normalized === "1" ||
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "on"
+  );
+}
+
+function readAllowList(filePath) {
+  try {
+    const input = fs.readFileSync(filePath, { encoding: "utf-8" });
+    return input
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"));
+  } catch (error) {
+    console.error(
+      `Failed to open \"${filePath}\"! See allowed.txt.example for a starting point.`,
+    );
+    return [];
+  }
+}
+
+function minifyCss(css) {
+  return css
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s*([{}:;,>+~])\s*/g, "$1")
+    .replace(/;}/g, "}")
+    .trim();
+}
+
+function minifyHtml(html) {
+  return html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/>\s+</g, "><")
+    .replace(/\s{2,}/g, " ")
+    .replace(/&apos;/g, "'")
+    .trim();
+}
+
+function removeAttr(tag, attrName) {
+  const attrRegex = new RegExp(
+    `\\s${attrName}\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)`,
+    "gi",
+  );
+  return tag.replace(attrRegex, "");
+}
+
+function getAttr(tag, attrName) {
+  const regex = new RegExp(
+    `${attrName}\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s>]+))`,
+    "i",
+  );
+  const match = tag.match(regex);
+  if (!match) return null;
+  return match[2] ?? match[3] ?? match[4] ?? null;
+}
+
+function setAttr(tag, attrName, attrValue) {
+  const attrRegex = new RegExp(
+    `(${attrName}\\s*=\\s*)(\"[^\"]*\"|'[^']*'|[^\\s>]+)`,
+    "i",
+  );
+  if (attrRegex.test(tag)) {
+    return tag.replace(attrRegex, `$1\"${attrValue}\"`);
+  }
+
+  if (tag.endsWith("/>")) {
+    return tag.slice(0, -2) + ` ${attrName}=\"${attrValue}\"/>`;
+  }
+
+  return tag.slice(0, -1) + ` ${attrName}=\"${attrValue}\">`;
+}
+
+function processHtml(html, options) {
+  const { friendly, stripJs, stripCSS, maxInlineWidth, targetUrl } = options;
+
+  let output = html.replace(/https:\/\//g, "http://");
+
+  if (!friendly && stripJs) {
+    output = output
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<script\b[^>]*\/?>/gi, "")
+      .replace(/<noscript\b[^>]*>([\s\S]*?)<\/noscript>/gi, "$1");
+  }
+
+  if (!friendly && stripCSS) {
+    output = output
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<link\b[^>]*>/gi, "");
+
+    output = output.replace(/<([a-z][^>]*?)>/gi, (match) => {
+      if (/^<\//.test(match)) return match;
+      let tag = removeAttr(match, "class");
+      tag = removeAttr(tag, "style");
+      return tag;
+    });
+  }
+
+  if (!friendly) {
+    output = output.replace(/<img\b[^>]*>/gi, (tag) => {
+      const src = getAttr(tag, "src");
+      if (!src) return tag;
+
+      let srcUrl = src;
+      try {
+        srcUrl = new URL(src, targetUrl).href;
+      } catch (_error) {
+        // keep original src if URL is malformed
+      }
+
+      if (
+        srcUrl.toLowerCase().endsWith(".svg") ||
+        srcUrl.toLowerCase().includes(".svg?")
+      ) {
+        return "";
+      }
+
+      if (
+        !maxInlineWidth ||
+        Number.isNaN(maxInlineWidth) ||
+        maxInlineWidth <= 0
+      ) {
+        return tag;
+      }
+
+      const attrWidthRaw = getAttr(tag, "width");
+      const attrHeightRaw = getAttr(tag, "height");
+      const attrWidth = attrWidthRaw ? Number(attrWidthRaw) : NaN;
+      const attrHeight = attrHeightRaw ? Number(attrHeightRaw) : NaN;
+
+      if (Number.isFinite(attrWidth) && attrWidth > 0) {
+        const width = Math.min(maxInlineWidth, attrWidth);
+        let updated = setAttr(tag, "width", Math.round(width));
+        if (Number.isFinite(attrHeight) && attrHeight > 0) {
+          const height = (attrHeight * width) / attrWidth;
+          updated = setAttr(updated, "height", Math.max(1, Math.round(height)));
+        }
+        return updated;
+      }
+
+      return setAttr(tag, "width", Math.round(maxInlineWidth));
+    });
+  }
+
+  // Fix root-relative URLs for older browsers
+  let origin = "";
+  try {
+    origin = new URL(targetUrl).origin;
+  } catch (_error) {
+    origin = "";
+  }
+
+  if (origin) {
+    output = output.replace(
+      /(href\s*=\s*[\"'])\/(?!\/)([^\"']*)([\"'])/gi,
+      (_m, p1, p2, p3) => {
+        return `${p1}${origin}/${p2}${p3}`;
+      },
+    );
+  }
+
+  return output;
+}
+
+function resolveTargetUrl(req) {
+  const raw = req.url || "";
+  if (/^https?:\/\//i.test(raw)) {
+    return raw;
+  }
+
+  const host = req.headers.host;
+  if (!host) {
+    return null;
+  }
+
+  try {
+    return new URL(raw, `http://${host}`).href;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function isFriendly(targetUrl, friendlies) {
+  try {
+    const hostname = new URL(targetUrl).hostname;
+    return friendlies.some((f) => hostname === f || hostname.endsWith(`.${f}`));
+  } catch (_error) {
+    return false;
+  }
+}
+
+function requestUrl(targetUrl, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(targetUrl);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const client = parsed.protocol === "https:" ? https : http;
+    const request = client.get(
+      targetUrl,
+      {
+        headers: {
+          "accept-encoding": "identity",
+          "user-agent": "retro-proxy/0.0.1",
+        },
+      },
+      (response) => {
+        const status = response.statusCode || 502;
+        const headers = response.headers || {};
+
+        if (
+          status >= 300 &&
+          status < 400 &&
+          typeof headers.location === "string" &&
+          redirectCount < 5
+        ) {
+          const redirectUrl = new URL(headers.location, targetUrl).href;
+          response.resume();
+          resolve(requestUrl(redirectUrl, redirectCount + 1));
+          return;
+        }
+
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          resolve({
+            status,
+            headers,
+            body: Buffer.concat(chunks),
+          });
+        });
+      },
+    );
+
+    request.on("error", reject);
+  });
+}
+
+loadDotEnv();
+
+const ip = process.env.IP || "";
+const port = Number(process.env.PORT || 3000);
+const stripCSS = parseBoolean(process.env.NO_CSS);
+const stripJs = parseBoolean(process.env.NO_JS);
+const maxInlineWidth = process.env.SCALE_TO
+  ? Number(process.env.SCALE_TO)
+  : NaN;
+const allowListPath = process.env.ALLOWLIST || "allowed.txt";
+const friendlies = readAllowList(allowListPath);
+
+console.log("allow-list", friendlies);
+
+const server = http.createServer(async (req, res) => {
+  if (req.method !== "GET") {
+    res.statusCode = 405;
+    res.setHeader("Content-Type", "text/plain");
+    res.end("Only GET is supported.");
+    return;
+  }
+
+  const targetUrl = resolveTargetUrl(req);
+  if (!targetUrl) {
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "text/plain");
+    res.end("Bad request URL.");
+    return;
+  }
+
+  const friendly = isFriendly(targetUrl, friendlies);
+  if (friendly) {
+    console.log("friendly site:", targetUrl);
+  }
+
+  try {
+    const upstream = await requestUrl(targetUrl);
+    const contentType =
+      typeof upstream.headers["content-type"] === "string"
+        ? upstream.headers["content-type"]
+        : "application/octet-stream";
+
+    res.statusCode = upstream.status;
+    res.setHeader("Content-Type", contentType);
+
+    if (contentType.startsWith("text/html")) {
+      const text = upstream.body.toString("utf-8");
+      const processed = processHtml(text, {
+        friendly,
+        stripJs,
+        stripCSS,
+        maxInlineWidth,
+        targetUrl,
+      });
+
+      if (!friendly) {
+        const minified = minifyHtml(processed);
+        console.log("html minified", contentType, targetUrl);
+        res.end(minified);
+      } else {
+        res.end(processed.replace(/&apos;/g, "'"));
+      }
+      return;
+    }
+
+    if (contentType.startsWith("text/css")) {
+      const text = upstream.body.toString("utf-8");
+      const minifiedCss = minifyCss(text);
+      console.log("css minified", contentType, targetUrl);
+      res.end(minifiedCss);
+      return;
+    }
+
+    // No dependency image conversion/compression: pass through original bytes.
+    res.end(upstream.body);
   } catch (error) {
     console.error(error);
-    res.set("Content-Type", "text/html");
-    res.status(502);
-    res.send(
-      `<html>
+    res.statusCode = 502;
+    res.setHeader("Content-Type", "text/html");
+    res.end(`<html>
   <head>
     <title>502 - Bad Gateway</title>
   </head>
   <body>
     <h1>502 - Bad Gateway</h1>
-    <p>An error occurred while retrieving the page. Please check the server log for details.
+    <p>An error occurred while retrieving the page. Please check the server log for details.</p>
   </body>
-</html>`
-    );
+</html>`);
   }
 });
 
-if (ip != "") {
-  app.listen(port, ip);
+if (ip) {
+  server.listen(port, ip);
 } else {
-  app.listen(port);
+  server.listen(port);
 }
+
 console.log(
-  `Listening on port ${port}, CSS is ${
-    stripCSS ? "disabled" : "enabled"
-  }, images are ${minifyImages ? "compressed" : "original quality"}`
+  `Listening on port ${port}, CSS is ${stripCSS ? "disabled" : "enabled"}, image transcoding is disabled (no external libraries).`,
 );
