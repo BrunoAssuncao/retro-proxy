@@ -177,7 +177,9 @@ function processHtml(html, options) {
         return updated;
       }
 
-      return setAttr(tag, "width", Math.round(maxInlineWidth));
+      // If width is not explicitly declared, don't force one.
+      // Otherwise tiny assets (buttons/icons) can get upscaled to SCALE_TO.
+      return tag;
     });
   }
 

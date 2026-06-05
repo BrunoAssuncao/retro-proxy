@@ -31,4 +31,4 @@ npm start
 
 - HTML/CSS rewriting and minification are now implemented with lightweight built-in logic.
 - Image transcoding/compression via external libraries has been removed to keep the project dependency-free.
-- `SCALE_TO` still adjusts inline `img` width/height when width attributes exist (or sets width when missing).
+- `SCALE_TO` adjusts inline `img` width/height only when a numeric `width` attribute already exists (downscale-only, no upscaling).
